@@ -1,0 +1,699 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title id="title">ESP32-CAM Simplified View</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+    <link rel="stylesheet" type="text/css" href="/style.css">
+    <style>
+    // style overrides here
+    canvas {
+      display:block; 
+      position:absolute; 
+      z-index: 1;
+    }
+    .container {
+      width:auto;
+      text-align:center;
+      background-color:#ff0000;
+    }
+    canvas#canvas{
+      //display: block;
+      margin: 0px;
+      //width: 100%;
+      height: auto;
+      //position:absolute;
+      //top:6vh;right:0;left:0;
+      margin:auto;
+      background:blue
+    }
+    </style>
+  </head>
+
+  <body>
+    <section class="main">
+      <div id="logo">
+        <label for="nav-toggle-cb" id="nav-toggle" style="float:left;" title="Settings">&#9776;&nbsp;</label>
+        <button id="swap-viewer" style="float:left;" title="Swap to full feature viewer">Full</button>
+        <button id="get-still" style="float:left;">Get Still</button>
+        <button id="toggle-stream" style="float:left;" class="hidden">Start Stream</button>
+        <div id="wait-settings" style="float:left;" class="loader" title="Waiting for camera settings to load"></div>
+      </div>
+      <div id="content">
+        <div class="hidden" id="sidebar">
+          <input type="checkbox" id="nav-toggle-cb">
+            <nav id="menu" style="width:24em;">
+              <div class="input-group hidden" id="lamp-group">
+                <label for="lamp">Light</label>
+                <div class="range-min">Off</div>
+                <input type="range" id="lamp" min="0" max="100" value="0" class="action-setting">
+                <div class="range-max">Full</div>
+              </div>
+              <div class="input-group" id="framesize-group">
+                <label for="framesize">Resolution</label>
+                <select id="framesize" class="action-setting">
+                  <option value="10">UXGA(1600x1200)</option>
+                  <option value="9">SXGA(1280x1024)</option>
+                  <option value="8">XGA(1024x768)</option>
+                  <option value="7">SVGA(800x600)</option>
+                  <option value="6">VGA(640x480)</option>
+                  <option value="5">CIF(400x296)</option>
+                  <option value="4">QVGA(320x240)</option>
+                  <option value="3">HQVGA(240x176)</option>
+                  <option value="0">QQVGA(160x120)</option>
+                </select>
+              </div>
+              <!-- Hide the next entries, they are present in the body so that we
+                  can pass settings to/from them for use in the scripting, not for user setting -->
+              <div id="rotate" class="action-setting hidden"></div>
+              <div id="cam_name" class="action-setting hidden"></div>
+              <div id="stream_url" class="action-setting hidden"></div>
+              <div id="detect" class="action-setting hidden"></div> 
+              <div id="recognize" class="action-setting hidden"></div>
+            </nav>
+        </div>
+        <figure>
+          <div id="stream-container" class="image-container hidden">
+            <div class="close close-rot-none" id="close-stream">×</div>
+            <canvas id="canvas" width=100% height=100%> </canvas>
+            <img id="stream" src="">
+          </div>
+        </figure>
+      </div>
+    </section>
+  </body>
+
+  <script>
+  document.addEventListener('DOMContentLoaded', function (event) {
+    var baseHost = document.location.origin;
+    var streamURL = 'Undefined';
+
+    const settings = document.getElementById('sidebar')
+    const waitSettings = document.getElementById('wait-settings')
+    const lampGroup = document.getElementById('lamp-group')
+    const rotate = document.getElementById('rotate')
+    const view = document.getElementById('stream')
+    const viewContainer = document.getElementById('stream-container')
+    const stillButton = document.getElementById('get-still')
+    const streamButton = document.getElementById('toggle-stream')
+    const closeButton = document.getElementById('close-stream')
+    const swapButton = document.getElementById('swap-viewer')
+
+    const hide = el => {
+      el.classList.add('hidden')
+    }
+    const show = el => {
+      el.classList.remove('hidden')
+    }
+
+    const disable = el => {
+      el.classList.add('disabled')
+      el.disabled = true
+    }
+
+    const enable = el => {
+      el.classList.remove('disabled')
+      el.disabled = false
+    }
+
+    const updateValue = (el, value, updateRemote) => {
+      updateRemote = updateRemote == null ? true : updateRemote
+      let initialValue
+      if (el.type === 'checkbox') {
+        initialValue = el.checked
+        value = !!value
+        el.checked = value
+      } else {
+        initialValue = el.value
+        el.value = value
+      }
+
+      if (updateRemote && initialValue !== value) {
+        updateConfig(el);
+      } else if(!updateRemote){
+        if(el.id === "lamp"){
+          if (value == -1) { 
+            hide(lampGroup)
+          } else {
+            show(lampGroup)
+          }
+        } else if(el.id === "cam_name"){
+          window.document.title = value;
+          console.log('Name set to: ' + value);
+        } else if(el.id === "code_ver"){
+          console.log('Firmware Build: ' + value);
+        } else if(el.id === "rotate"){
+          rotate.value = value;
+          applyRotation();
+        } else if(el.id === "stream_url"){
+          streamURL = value;
+          streamButton.setAttribute("title", `Start the stream :: {streamURL}`);
+          console.log('Stream URL set to:' + value);
+        } 
+      }
+    }
+
+    function updateConfig (el) {
+      let value
+      switch (el.type) {
+        case 'checkbox':
+          value = el.checked ? 1 : 0
+          break
+        case 'range':
+        case 'select-one':
+          value = el.value
+          break
+        case 'button':
+        case 'submit':
+          value = '1'
+          break
+        default:
+          return
+      }
+
+      const query = `${baseHost}/control?var=${el.id}&val=${value}`
+
+      fetch(query)
+        .then(response => {
+          console.log(`request to ${query} finished, status: ${response.status}`)
+        })
+    }
+
+    document
+      .querySelectorAll('.close')
+      .forEach(el => {
+        el.onclick = () => {
+          hide(el.parentNode)
+        }
+      })
+
+    // read initial values
+    fetch(`${baseHost}/status`)
+      .then(function (response) {
+        return response.json()
+      })
+      .then(function (state) {
+        document
+          .querySelectorAll('.action-setting')
+          .forEach(el => {
+            updateValue(el, state[el.id], false)
+          })
+        hide(waitSettings);
+        show(settings);
+        show(streamButton);
+        startStream();
+      })
+
+    // Put some helpful text on the 'Still' button
+    stillButton.setAttribute("title", `Capture a still image :: ${baseHost}/capture`);
+
+    const stopStream = () => {
+      window.stop();
+      streamButton.innerHTML = 'Start Stream';
+          streamButton.setAttribute("title", `Start the stream :: ${streamURL}`);
+      hide(viewContainer);
+    }
+
+    const startStream = () => {
+      view.src = streamURL;
+      view.scrollIntoView(false);
+      streamButton.innerHTML = 'Stop Stream';
+      streamButton.setAttribute("title", `Stop the stream`);
+      show(viewContainer);
+    }
+
+    const applyRotation = () => {
+      rot = rotate.value;
+      if (rot == -90) {
+        viewContainer.style.transform = `rotate(-90deg)  translate(-100%)`;
+        closeButton.classList.remove('close-rot-none');
+        closeButton.classList.remove('close-rot-right');
+        closeButton.classList.add('close-rot-left');
+      } else if (rot == 90) {
+        viewContainer.style.transform = `rotate(90deg) translate(0, -100%)`;
+        closeButton.classList.remove('close-rot-left');
+        closeButton.classList.remove('close-rot-none');
+        closeButton.classList.add('close-rot-right');
+      } else {
+        viewContainer.style.transform = `rotate(0deg)`;
+        closeButton.classList.remove('close-rot-left');
+        closeButton.classList.remove('close-rot-right');
+        closeButton.classList.add('close-rot-none');
+      }
+       console.log('Rotation ' + rot + ' applied');
+   }
+
+    // Attach actions to controls
+
+    stillButton.onclick = () => {
+      stopStream();
+      view.src = `${baseHost}/capture?_cb=${Date.now()}`;
+      view.scrollIntoView(false);
+      show(viewContainer);
+    }
+
+    closeButton.onclick = () => {
+      stopStream();
+      hide(viewContainer);
+    }
+
+    streamButton.onclick = () => {
+      const streamEnabled = streamButton.innerHTML === 'Stop Stream'
+      if (streamEnabled) {
+        stopStream();
+      } else {
+        startStream();
+      }
+    }
+
+    // Attach default on change action
+    document
+      .querySelectorAll('.action-setting')
+      .forEach(el => {
+        el.onchange = () => updateConfig(el)
+      })
+
+    // Custom actions
+    // Detection and framesize
+    rotate.onchange = () => {
+      applyRotation();
+      updateConfig(rotate);
+    }
+
+    framesize.onchange = () => {
+      updateConfig(framesize)
+      if (framesize.value > 5) {
+        updateValue(detect, false)
+        updateValue(recognize, false)
+      }
+    }
+
+    swapButton.onclick = () => {
+      window.open('/?view=full','_self');
+    }
+
+  })
+
+  ////////////////////////////////////////////////////////////////////
+  ////////////////////////////////////////////////////////////////////
+  function toStatus(txt) {document.getElementById('status').innerHTML=txt; }
+  function toReply(txt) {document.getElementById('reply').innerHTML=txt; }
+  var sendFlag = false;
+
+  host = window.location.hostname;
+  if(!host) host = '192.168.4.1'; //For debugging only 
+  var ipaddr= host + ":82"; // websock port of ESP32, normally xx.xx.xx.xx:82
+  var websock = new WebSocket('ws://' + ipaddr);
+  websock.binaryType = 'arraybuffer';
+  websock.onopen = function(evt) {
+    console.log('websock open');
+  };
+
+  websock.onclose = function(evt) {
+    console.log('websock close');
+    toStatus('websock close');
+  };
+
+  websock.onerror = function(evt) { console.log(evt); toStatus(evt) };
+
+  
+
+  var Vector2 = function (x,y) {
+    this.x = x || 0;
+    this.y = y || 0;
+  };
+
+  Vector2.prototype = {
+
+    reset: function ( x, y ) {
+    
+      this.x = x;
+      this.y = y;
+      return this;
+    },
+    
+    copyFrom : function (v) {
+      this.x = v.x;
+      this.y = v.y;
+    },
+    
+    plusEq : function (v) {
+      this.x+=v.x;
+      this.y+=v.y;
+      return this;
+    },
+    
+    minusEq : function (v) {
+      this.x-=v.x;
+      this.y-=v.y;
+      return this; 
+    },
+    
+    equals : function (v) {
+      return((this.x==v.x)&&(this.y==v.x));
+    }
+
+  };
+    var mouseX, 
+        mouseY,
+        mouseDown = false,
+        touches = []; // array of touch vectors;
+    var canvas,
+        scanvas,
+        c, // c is the canvas' context 2D
+        container, 
+        halfWidth, 
+        halfHeight,
+        leftTouchID = -1, 
+        leftTouchPos = new Vector2(0,0),
+        leftTouchStartPos = new Vector2(0,0),
+        leftVector = new Vector2(0,0);
+
+
+    canvas = document.createElement('canvas');
+    c = canvas.getContext('2d');
+    var div = document.getElementById("stream-container");
+    var positionInfo = div.getBoundingClientRect();
+    canvas.id     = "canvGameStage";
+    canvas.width  = positionInfo.width;
+    canvas.height = positionInfo.height;
+    canvas.style.zIndex   = 8;
+    canvas.style.position = "absolute";
+    canvas.style.border   = "1px solid";
+    container = document.createElement( 'div' );
+    container.className = "container";
+    
+    document.body.appendChild( container );
+    container.appendChild(canvas);
+    /* div.appendChild(canvas); */
+    resetCanvas();
+
+    function resetCanvas (e) {
+        // resize the canvas - but remember - this clears the canvas too. 
+        canvas.width = window.innerWidth; 
+        canvas.height = window.innerHeight;
+        
+        //halfWidth = canvas.width/2; 
+        halfWidth = canvas.width;
+
+        halfHeight = canvas.height/2;
+        
+        //make sure we scroll to the top left. 
+        window.scrollTo(0,0); 
+    }
+
+    setInterval(draw, 1000/30); // draw app at 30fps
+    setInterval(sendControls, 1000/20); // send control input at 20fps
+    canvas.addEventListener( 'touchstart', onTouchStart, false );
+    canvas.addEventListener( 'touchmove', onTouchMove, false );
+    canvas.addEventListener( 'touchend', onTouchEnd, false );
+    window.onorientationchange = resetCanvas;  
+    window.onresize = resetCanvas;  
+
+
+    canvas.addEventListener( 'mousemove', onMouseMove, false );
+    canvas.addEventListener( 'mousedown', onMouseDown, false );
+    canvas.addEventListener( 'mouseup', onMouseUp, false );
+
+
+    var rawLeft, rawRight, MaxJoy = 255, MinJoy = -255, MaxValue = 255,
+        MinValue = -255, RawLeft, RawRight, ValLeft, ValRight;
+    var leftMot = 0, rightMot = 0;
+
+    function Remap(value, from1, to1, from2, to2){
+        return (value - from1) / (to1 - from1) * (to2 - from2) + from2;
+    }
+
+    // source: http://www.dyadica.co.uk/basic-differential-aka-tank-drive/
+    function tankDrive(x, y){
+        var z = Math.sqrt(x * x + y * y);
+        var rad = Math.acos(Math.abs(x) / z);
+        
+        if (isNaN(rad)) rad = 0;
+        var angle = rad * 180 / Math.PI;
+        var tcoeff = -1 + (angle / 90) * 2;
+        var turn = tcoeff * Math.abs(Math.abs(y) - Math.abs(x));
+        
+        turn = Math.round(turn * 100) / 100;
+        var move = Math.max(Math.abs(y), Math.abs(x));
+        
+        if ((x >= 0 && y >= 0) || (x < 0 && y < 0)){
+            rawLeft = move;
+            rawRight = turn;
+        }else{
+            rawRight = move;
+            rawLeft = turn;
+        }
+
+        if (y < 0){
+            rawLeft = 0 - rawLeft;
+            rawRight = 0 - rawRight;
+        }
+        
+        RawLeft = rawLeft;
+        RawRight = rawRight;
+        
+        leftMot = Remap(rawLeft, MinJoy, MaxJoy, MinValue, MaxValue);
+        rightMot = Remap(rawRight, MinJoy, MaxJoy, MinValue, MaxValue);
+    }
+
+    function draw() {
+        c.clearRect(0,0,canvas.width, canvas.height); 
+
+        //if touch
+        for(var i=0; i<touches.length; i++) {
+            
+            var touch = touches[i]; 
+            
+            if(touch.identifier == leftTouchID){
+            c.beginPath(); 
+            c.strokeStyle = "white"; 
+            c.lineWidth = 6; 
+            c.arc(leftTouchStartPos.x, leftTouchStartPos.y, 40,0,Math.PI*2,true); 
+            c.stroke();
+            c.beginPath(); 
+            c.strokeStyle = "white"; 
+            c.lineWidth = 2; 
+            c.arc(leftTouchStartPos.x, leftTouchStartPos.y, 60,0,Math.PI*2,true); 
+            c.stroke();
+            c.beginPath(); 
+            c.strokeStyle = "white"; 
+            c.arc(leftTouchPos.x, leftTouchPos.y, 40, 0,Math.PI*2, true); 
+            c.stroke(); 
+            
+            } else {
+            
+            c.beginPath(); 
+            c.fillStyle = "white";
+            //c.fillText("touch id : "+touch.identifier+" x:"+touch.clientX+" y:"+touch.clientY, touch.clientX+30, touch.clientY-30); 
+        
+            c.beginPath(); 
+            c.strokeStyle = "red";
+            c.lineWidth = "6";
+            c.arc(touch.clientX, touch.clientY, 40, 0, Math.PI*2, true); 
+            c.stroke();
+            }
+        }
+
+        //if not touch   
+        if(mouseDown){
+            c.beginPath(); 
+            c.strokeStyle = "white"; 
+            c.lineWidth = 6; 
+            c.arc(leftTouchStartPos.x, leftTouchStartPos.y, 40,0,Math.PI*2,true); 
+            c.stroke();
+            c.beginPath(); 
+            c.strokeStyle = "white"; 
+            c.lineWidth = 2; 
+            c.arc(leftTouchStartPos.x, leftTouchStartPos.y, 60,0,Math.PI*2,true); 
+            c.stroke();
+            c.beginPath(); 
+            c.strokeStyle = "white"; 
+            c.arc(leftTouchPos.x, leftTouchPos.y, 40, 0,Math.PI*2, true); 
+            c.stroke(); 
+                
+            c.fillStyle  = "white"; 
+            //c.fillText("mouse : "+mouseX+", "+mouseY, mouseX, mouseY); 
+            c.beginPath(); 
+            c.strokeStyle = "white";
+            c.lineWidth = "6";
+            c.arc(mouseX, mouseY, 40, 0, Math.PI*2, true); 
+            c.stroke();
+        }
+
+        
+        //c.fillText("Left Motor: " + leftMot + " Right Motor: " + rightMot, 10, 30);
+        //c.fillText("Left Vx: " + leftVector.x + " Left Vy: " + leftVector.y, 10, 50);
+        
+        websock.onmessage=function(event) {
+            console.log('Data received: ' + event.data);
+            //console.log(typeof event.data);
+            
+            if (typeof event.data === 'string'){
+                var msgReceived=JSON.parse(event.data);
+                console.log(msgReceived);
+                if(msgReceived.hasOwnProperty('temp')){
+                    temperature = parseInt(msgReceived.temp);
+                    document.getElementById("temp").innerHTML = temperature + '&#176C';
+                }
+                if(msgReceived.hasOwnProperty('volt')){
+                    voltage = parseFloat(msgReceived.volt).toFixed(2);
+                    document.getElementById("volt").innerHTML = voltage + 'V';
+                }
+            }
+        }
+    }
+
+    window.addEventListener('resize', resizeStream, false);
+
+  function resizeStream() {
+    aspectRatio = 800/600;
+    maxHeight = window.innerHeight - document.getElementById('navTop').offsetHeight - document.getElementById('navBottom').offsetHeight;
+    if(window.innerWidth*aspectRatio <= maxHeight){
+      document.getElementById('stream').style.height = window.innerWidth*aspectRatio + "px";
+      document.getElementById('stream').style.width = window.innerWidth + "px";
+    }
+    else {
+      document.getElementById('stream').style.height = maxHeight + "px";
+      document.getElementById('stream').style.width = maxHeight/aspectRatio + "px";
+    }
+  }
+
+    /* 
+    * Touch event
+    */  
+    function onTouchStart(e) {
+    
+        for(var i = 0; i<e.changedTouches.length; i++){
+            var touch =e.changedTouches[i];
+            //console.log(leftTouchID + " "
+            if((leftTouchID<0) && (touch.clientX<halfWidth)){
+            
+            leftTouchID = touch.identifier;
+            leftTouchStartPos.reset(touch.clientX, touch.clientY);
+            leftTouchPos.copyFrom(leftTouchStartPos);
+            leftVector.reset(0,0);
+            continue;
+            } else{
+            
+            makeBullet();
+            }
+        }
+        touches = e.touches;
+        }
+
+    function onMouseDown(event) {
+        leftTouchStartPos.reset(event.offsetX, event.offsetY);
+        leftTouchPos.copyFrom(leftTouchStartPos);
+        leftVector.reset(0,0);
+        mouseDown = true;
+    }
+    
+    function onTouchMove(e) {
+        // Prevent the browser from doing its default thing (scroll, zoom)
+        e.preventDefault();
+        
+        for(var i = 0; i<e.changedTouches.length; i++){
+            var touch =e.changedTouches[i];
+            if(leftTouchID == touch.identifier){
+            leftTouchPos.reset(touch.clientX, touch.clientY);
+            leftVector.copyFrom(leftTouchPos);
+            leftVector.minusEq(leftTouchStartPos);
+            sendFlag = true;
+            break;
+            }
+        }
+        
+        touches = e.touches;
+    
+    }
+
+    function onMouseMove(event){
+        mouseX = event.offsetX;
+        mouseY = event.offsetY;
+        if(mouseDown){
+            leftTouchPos.reset(event.offsetX, event.offsetY);
+            leftVector.copyFrom(leftTouchPos);
+            leftVector.minusEq(leftTouchStartPos);
+            sendFlag = true;
+        }
+    }
+    
+    function onTouchEnd(e){
+        touches = e.touches;
+
+        for(var i = 0; i<e.changedTouches.length; i++){
+            var touch =e.changedTouches[i];
+            if(leftTouchID == touch.identifier){
+            leftTouchID = -1;
+            leftVector.reset(0,0);
+            leftMot = rightMot = 0;
+            sendFlag = true;
+            break;
+            }
+        }
+    }
+
+    function onMouseUp(event) { 
+        leftVector.reset(0,0);
+        leftMot = rightMot = 0;
+        mouseDown = false;
+        sendFlag = true;
+    }
+
+    /*
+    Source for keyboard detection: Braden Best:
+    https://stackoverflow.com/questions/5203407/how-to-detect-if-multiple-keys-are-pressed-at-once-using-javascript
+    */ 
+    var map = {};
+    onkeydown = onkeyup = function(e){
+    e = e || event; // to deal with IE
+    map[e.keyCode] = e.type == 'keydown';
+    
+    if(map[38]){ // ArrowUp
+        leftVector.y = -55;
+    }
+    if(map[40]){ // ArrowDown
+        leftVector.y = 55;
+    }
+    if(map[37]){ // ArrowLeft
+        leftVector.x = -55;
+    }
+    if(map[39]){ // ArrowRight
+        leftVector.x = 55;
+    }
+    
+    if(!map[38] && !map[40]){ // ArrowUp/Down is not pressed
+        leftVector.y = 0;
+    }
+    if(!map[37] && !map[39]){ // ArrowLeft/Right is not pressed
+        leftVector.x = 0;
+    }
+    if(leftVector.y == 0 && leftVector.x == 0) leftMot = rightMot = 0;
+        sendFlag = true;
+    }
+
+    function mouseOver(minX, minY, maxX, maxY){
+        return(mouseX>minX&&mouseY>minY&&mouseX<maxX&&mouseY<maxY);
+    }
+
+    function sendControls(){
+        if(sendFlag == true){
+            leftVector.x = Math.min(Math.max(parseInt(leftVector.x), -255), 255);
+            leftVector.y = Math.min(Math.max(parseInt(leftVector.y), -255), 255);
+            
+            tankDrive(leftVector.x, -leftVector.y);
+            if(leftMot > 0) leftMot += 70;
+            if(leftMot < 0) leftMot -= 70;
+            if(rightMot > 0) rightMot += 70;
+            if(rightMot < 0) rightMot -= 70;
+            leftMot = Math.min(Math.max(parseInt(leftMot), -255), 255);
+            rightMot = Math.min(Math.max(parseInt(rightMot), -255), 255);
+            
+            websock.send(JSON.stringify({ cmd : "pos", val : leftMot, val2 : rightMot }));
+            sendFlag = false;
+        }
+    }
+  </script>
+</html>
